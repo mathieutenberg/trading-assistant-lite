@@ -1,124 +1,135 @@
-129
-130
-131
-132
-133
-134
-135
-136
-137
-138
-139
-140
-141
-142
-143
-144
-145
-146
-147
-148
-149
-150
-151
-152
-153
-154
-155
-156
-157
-158
-159
-160
-161
-162
-163
-164
-165
-166
-167
-168
-169
-170
-171
-172
-173
-174
-175
-176
-177
-178
-179
-180
-181
-182
-183
-184
-185
-186
-187
-188
-189
-190
-191
-192
-193
-194
-195
-196
-197
-198
-199
-200
-201
-202
-203
-204
-205
-206
-207
-208
-209
-210
-211
-212
-213
-214
-215
-216
-217
-218
-219
-220
-221
-222
-223
-224
-225
-226
-227
-228
-229
-230
-231
-232
-233
-234
-235
-236
-237
-238
-239
-240
-241
-242
-243
-244
-245
-246
-247
-248
-249
+"""Telegram Trading Assistant Lite: standalone Home Assistant add-on.
+No third-party Python dependencies. API keys remain in add-on options.
+"""
+import datetime as dt
+import json
+import logging
+import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+LOG = logging.getLogger("trading-lite")
+DATA = Path("/data")
+DATA.mkdir(parents=True, exist_ok=True)
+OPTIONS = json.loads((DATA / "options.json").read_text())
+TOKEN = OPTIONS.get("telegram_bot_token", "").strip()
+CHAT = str(OPTIONS.get("telegram_chat_id", "")).strip()
+FINNHUB = OPTIONS.get("finnhub_api_key", "").strip()
+OPENAI = OPTIONS.get("openai_api_key", "").strip()
+MODEL = OPTIONS.get("openai_model", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+STATE_FILE = DATA / "trading_state.json"
+DEFAULT_WATCHLIST = ["AAPL", "NVDA", "MSFT", "QQQ", "SPY"]
+KEYBOARD = {"keyboard": [[{"text": "📈 Koersen"}, {"text": "🌍 Markt"}], [{"text": "📰 Nieuws"}, {"text": "⭐ Watchlist"}], [{"text": "🤖 AI"}, {"text": "❓ Help"}]], "resize_keyboard": True}
+
+
+def request_json(url, payload=None, headers=None, timeout=25):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": "TradingAssistantLite/1.0", **({"Content-Type": "application/json"} if payload is not None else {}), **(headers or {})}, method="POST" if payload is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:250]
+        raise RuntimeError(f"API HTTP {exc.code}: {body}") from exc
+
+
+def telegram(method, payload):
+    try:
+        response = request_json(f"https://api.telegram.org/bot{TOKEN}/{method}", payload, timeout=45)
+    except Exception as exc:
+        LOG.error("Telegram API-fout bij methode %s: %s", method, str(exc).replace(TOKEN, "[TOKEN]"))
+        raise
+    if not response.get("ok"):
+        raise RuntimeError(f"Telegram: {response.get('description', 'unknown error')}")
+    return response.get("result")
+
+
+def send(text, keyboard=True):
+    # Never call sendMessage with empty text.
+    text = str(text or "").strip()
+    if not text:
+        LOG.warning("Leeg antwoord geblokkeerd; geen Telegram-bericht verstuurd.")
+        return
+    # Telegram messages max 4096 characters; keep safe chunks.
+    for i in range(0, len(text), 3800):
+        payload = {"chat_id": CHAT, "text": text[i:i + 3800]}
+        if keyboard:
+            payload["reply_markup"] = KEYBOARD
+        telegram("sendMessage", payload)
+
+
+def load_state():
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        return {"watchlist": state.get("watchlist", DEFAULT_WATCHLIST), "ai_next": bool(state.get("ai_next", False)), "offset": int(state.get("offset", 0))}
+    except (OSError, ValueError, TypeError):
+        return {"watchlist": DEFAULT_WATCHLIST.copy(), "ai_next": False, "offset": 0}
+
+
+def save_state(state):
+    temp = STATE_FILE.with_suffix(".tmp")
+    temp.write_text(json.dumps(state, ensure_ascii=False))
+    temp.replace(STATE_FILE)
+
+
+def finnhub(path, params=None):
+    if not FINNHUB:
+        raise RuntimeError("Finnhub API-sleutel ontbreekt in de app-configuratie.")
+    params = {**(params or {}), "token": FINNHUB}
+    return request_json("https://finnhub.io/api/v1/" + path + "?" + urllib.parse.urlencode(params))
+
+
+def quote(symbol):
+    data = finnhub("quote", {"symbol": symbol})
+    price = data.get("c")
+    if not isinstance(price, (float, int)) or price <= 0:
+        return f"Geen geldige koers gevonden voor {symbol}."
+    change = data.get("dp")
+    sign = "+" if isinstance(change, (int, float)) and change > 0 else ""
+    change_text = f"{sign}{change:.2f}%" if isinstance(change, (int, float)) else "onbekend"
+    stamp = dt.datetime.fromtimestamp(data["t"], dt.timezone.utc).strftime("%d-%m %H:%M UTC") if data.get("t") else "onbekend"
+    return (f"📈 {symbol}: ${price:,.2f} ({change_text})\n"
+            f"Open: ${data.get('o', 0):,.2f} | Hoog: ${data.get('h', 0):,.2f} | Laag: ${data.get('l', 0):,.2f}\n"
+            f"Laatste koersupdate: {stamp}\nKoersen kunnen vertraagd zijn afhankelijk van je datalicentie.")
+
+
+def market():
+    lines = ["🌍 Markt (ETF-proxies, niet de officiële indexstanden):"]
+    for symbol, label in [("SPY", "S&P 500"), ("QQQ", "Nasdaq 100"), ("DIA", "Dow Jones"), ("IWM", "Russell 2000")]:
+        try:
+            d = finnhub("quote", {"symbol": symbol})
+            if d.get("c", 0) > 0:
+                lines.append(f"{label} ({symbol}): ${d['c']:.2f} | {d.get('dp', 0):+.2f}%")
+            else:
+                lines.append(f"{label}: geen koers beschikbaar")
+        except Exception:
+            lines.append(f"{label}: tijdelijk niet beschikbaar")
+    lines.append("Sentiment-indicatie: bekijk de richting van deze ETF's; geen gevalideerde sentimentindex.")
+    return "\n".join(lines)
+
+
+def news(symbol=None):
+    if symbol:
+        today = dt.datetime.now(dt.timezone.utc).date()
+        articles = finnhub("company-news", {"symbol": symbol, "from": str(today - dt.timedelta(days=7)), "to": str(today)})
+        heading = f"📰 Nieuws over {symbol}"
+    else:
+        articles = finnhub("news", {"category": "general"})
+        heading = "📰 Algemeen marktnieuws"
+    if not isinstance(articles, list) or not articles:
+        return heading + "\nGeen recente berichten beschikbaar."
+    lines = [heading]
+    for item in articles[:5]:
+        headline = str(item.get("headline", "Zonder titel"))[:180]
+        source = item.get("source", "onbekend")
+        timestamp = item.get("datetime")
+        published = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).strftime("%d-%m %H:%M UTC") if timestamp else "tijd onbekend"
+        link = item.get("url", "")
         lines.append(f"\n• {headline}\n{source} · {published}\n{link}")
     return "\n".join(lines)
 
@@ -203,7 +214,7 @@ def main():
     if not TOKEN or not CHAT or not FINNHUB:
         raise SystemExit("Vul telegram_bot_token, telegram_chat_id en finnhub_api_key in bij de app-configuratie.")
     state = load_state()
-    LOG.info("Trading Assistant Lite v1.0.1 gestart (alleen geautoriseerde chat).")
+    LOG.info("Trading Assistant Lite v1.0.2 gestart (alleen geautoriseerde chat).")
     try:
         me = telegram("getMe", {})
         LOG.info("Telegram API bereikbaar; bot: @%s", me.get("username", "onbekend"))
