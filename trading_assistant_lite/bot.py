@@ -28,9 +28,12 @@ DEFAULT_WATCHLIST = ["AAPL", "NVDA", "MSFT", "QQQ", "SPY"]
 KEYBOARD = {"keyboard": [
     ["📊 Overzicht", "📈 Koersen"],
     ["⭐ Watchlist", "➕ Toevoegen", "➖ Verwijderen"],
-    ["🎯 Scanner", "🌍 Markt"],
-    ["📰 Nieuws", "🤖 AI"],
-    ["⚙️ Instellingen", "❓ Help"]
+    ["🏢 Company", "📅 Earnings"],
+    ["🏦 Institutions", "🎯 Analysts"],
+    ["📊 Financials", "⭐ IBD Overview"],
+    ["📰 Stock News", "🌍 Market News"],
+    ["🤖 AI", "⚙️ Instellingen"],
+    ["❓ Help"]
 ], "resize_keyboard": True, "is_persistent": True}
 
 
@@ -73,9 +76,9 @@ def send(text, keyboard=True):
 def load_state():
     try:
         state = json.loads(STATE_FILE.read_text())
-        return {"watchlist": state.get("watchlist", DEFAULT_WATCHLIST), "ai_next": bool(state.get("ai_next", False)), "offset": int(state.get("offset", 0)), "pending": state.get("pending", ""), "menu_version": state.get("menu_version", "")}
+        return {"watchlist": state.get("watchlist", DEFAULT_WATCHLIST), "ai_next": bool(state.get("ai_next", False)), "offset": int(state.get("offset", 0)), "pending": state.get("pending", ""), "menu_version": state.get("menu_version", ""), "selected": state.get("selected", "NVDA")}
     except (OSError, ValueError, TypeError):
-        return {"watchlist": DEFAULT_WATCHLIST.copy(), "ai_next": False, "offset": 0, "pending": "", "menu_version": ""}
+        return {"watchlist": DEFAULT_WATCHLIST.copy(), "ai_next": False, "offset": 0, "pending": "", "menu_version": "", "selected": "NVDA"}
 
 
 def save_state(state):
@@ -145,32 +148,139 @@ def quote(symbol):
             "Koersen kunnen vertraagd zijn; aanvullende bron is indicatief.")
 
 
-def scanner(state):
-    symbols = list(dict.fromkeys(state["watchlist"]))[:25]
-    rows = []
-    for symbol in symbols:
-        try:
-            d = finnhub("quote", {"symbol": symbol})
-            if d.get("c",0) and isinstance(d.get("dp"), (float,int)):
-                rows.append((d["dp"],symbol,d["c"]))
-        except Exception:
-            pass
-    if not rows:
-        return "🎯 Scanner: geen koersdata beschikbaar voor je watchlist."
-    rows.sort(reverse=True)
-    lines = ["🎯 Scanner · watchlist op dagprestatie", "Geen marktbrede of technische breakoutscanner."]
-    for pct, symbol, price in rows[:15]:
-        lines.append(f"{symbol}: ${price:,.2f} ({pct:+.2f}%)")
+def overview(state):
+    symbol = state.get("selected", "NVDA")
+    return (f"📊 Trading Assistant Lite v1.2.0\nSelected: {symbol}\n"
+            f"Watchlist: {len(state['watchlist'])} tickers\n\n"
+            "Type NVDA (or another ticker) to select a stock and view its quote.\n"
+            "Use Company, Earnings, Institutions, Analysts, Financials, IBD Overview and Stock News for the selected ticker.\n"
+            "Some datasets may be unavailable on Finnhub Free; dates and sources are shown where possible.")
+
+
+def readable_time(ts):
+    try:
+        return dt.datetime.fromtimestamp(int(ts), dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, TypeError, OverflowError):
+        return "date unavailable"
+
+
+def safe_data(path, params=None):
+    try:
+        return finnhub(path, params), None
+    except Exception as exc:
+        LOG.info("Finnhub %s unavailable: %s", path, str(exc)[:120])
+        return None, "Not available on this data plan or temporarily unavailable."
+
+
+def fmt_num(value, digits=2):
+    return f"{value:,.{digits}f}" if isinstance(value, (int, float)) else "N/A"
+
+
+def company(symbol):
+    d, error = safe_data("stock/profile2", {"symbol": symbol})
+    if not isinstance(d, dict) or not d.get("name"):
+        return f"🏢 {symbol} · Company\n{error or 'Company profile unavailable.'}"
+    return (f"🏢 {d.get('name')} ({symbol})\n"
+            f"Industry: {d.get('finnhubIndustry') or 'N/A'}\n"
+            f"Country: {d.get('country') or 'N/A'} · Exchange: {d.get('exchange') or 'N/A'}\n"
+            f"Market cap: {fmt_num(d.get('marketCapitalization'))} million {d.get('currency') or ''}\n"
+            f"Shares outstanding: {fmt_num(d.get('shareOutstanding'))} million\n"
+            f"Website: {d.get('weburl') or 'N/A'}\n"
+            "Business description and competitors: not supplied by this Finnhub endpoint.")
+
+
+def earnings(symbol):
+    lines = [f"📅 {symbol} · Earnings"]
+    cal, err = safe_data("calendar/earnings", {"symbol": symbol, "from": str(dt.date.today()), "to": str(dt.date.today() + dt.timedelta(days=180))})
+    rows = cal.get("earningsCalendar", []) if isinstance(cal, dict) else []
+    upcoming = sorted((x for x in rows if x.get("date")), key=lambda x: x["date"])
+    if upcoming:
+        x = upcoming[0]
+        lines.append(f"Next reported/estimated date: {x.get('date')} ({x.get('hour') or 'time TBA'})")
+        lines.append(f"EPS estimate: {x.get('epsEstimate') if x.get('epsEstimate') is not None else 'N/A'} · Revenue estimate: {x.get('revenueEstimate') if x.get('revenueEstimate') is not None else 'N/A'}")
+    else:
+        lines.append("Next earnings date: not available/confirmed via current source.")
+    past, err = safe_data("stock/earnings", {"symbol": symbol, "limit": 4})
+    if isinstance(past, list) and past:
+        lines.append("\nRecent reported EPS (actual / estimate / surprise):")
+        for x in past[:4]:
+            lines.append(f"{x.get('period','N/A')}: {x.get('actual','N/A')} / {x.get('estimate','N/A')} / {x.get('surprisePercent','N/A')}%")
+    else:
+        lines.append("Historical EPS results unavailable on current source/plan.")
     return "\n".join(lines)
 
 
-def overview(state):
-    return ("📊 Trading Assistant Lite\n"
-            f"Watchlist: {len(state['watchlist'])} tickers\n"
-            "Typ NVDA voor koers en eventuele extended-hours-data.\n"
-            "Gebruik 🎯 Scanner voor een ranglijst van je watchlist.\n"
-            "Gebruik 🤖 AI voor een vraag.")
+def analysts(symbol):
+    lines = [f"🎯 {symbol} · Analysts"]
+    targets, _ = safe_data("stock/price-target", {"symbol": symbol})
+    if isinstance(targets, dict) and targets.get("targetMean") is not None:
+        lines.extend([f"Target mean: ${fmt_num(targets.get('targetMean'))}",
+                      f"Low / High: ${fmt_num(targets.get('targetLow'))} / ${fmt_num(targets.get('targetHigh'))}",
+                      f"Target update: {targets.get('lastUpdated') or 'N/A'}"])
+    else:
+        lines.append("Price targets unavailable on current plan.")
+    rec, _ = safe_data("stock/recommendation", {"symbol": symbol})
+    if isinstance(rec, list) and rec:
+        x = rec[0]
+        lines.append(f"\nRecommendations ({x.get('period','N/A')}): Strong buy {x.get('strongBuy',0)}, Buy {x.get('buy',0)}, Hold {x.get('hold',0)}, Sell {x.get('sell',0)}, Strong sell {x.get('strongSell',0)}")
+    else:
+        lines.append("Recommendation consensus unavailable.")
+    changes, _ = safe_data("stock/upgrade-downgrade", {"symbol": symbol})
+    if isinstance(changes, list) and changes:
+        lines.append("\nLatest rating changes:")
+        for x in sorted(changes, key=lambda z: z.get("gradeTime", 0), reverse=True)[:4]:
+            lines.append(f"{readable_time(x.get('gradeTime'))[:10]} · {x.get('company','N/A')} · {x.get('action','N/A')}: {x.get('fromGrade','?')} → {x.get('toGrade','?')}")
+    else:
+        lines.append("Individual upgrades/downgrades unavailable on current plan.")
+    return "\n".join(lines)
 
+
+def institutions(symbol):
+    lines = [f"🏦 {symbol} · Institutional Ownership"]
+    holders, _ = safe_data("stock/institutional-ownership", {"symbol": symbol})
+    rows = holders.get("ownership", []) if isinstance(holders, dict) else []
+    if rows:
+        lines.append(f"Reported institutional records: {len(rows)} (not necessarily total number of unique institutions)")
+        for x in rows[:8]:
+            lines.append(f"{x.get('name') or x.get('investorName') or 'Institution'}: {x.get('share') or x.get('shares') or 'N/A'} shares · filed {x.get('reportDate') or x.get('filingDate') or 'N/A'}")
+    else:
+        lines.append("Holder count and holdings are not available from the current Finnhub access.")
+    lines.append("13F institutional filings are delayed; never treat these as live holdings.")
+    return "\n".join(lines)
+
+
+def financials(symbol):
+    lines = [f"📊 {symbol} · Financials"]
+    metrics, _ = safe_data("stock/metric", {"symbol": symbol, "metric": "all"})
+    m = metrics.get("metric", {}) if isinstance(metrics, dict) else {}
+    if not m:
+        return "\n".join(lines + ["Financial metrics unavailable on current source/plan."])
+    for label, keys in [
+        ("P/E TTM", ["peTTM"]), ("EPS TTM", ["epsTTM"]),
+        ("Revenue growth 3Y (%)", ["revenueGrowth3Y"]),
+        ("Revenue growth 5Y (%)", ["revenueGrowth5Y"]),
+        ("EPS growth 3Y (%)", ["epsGrowth3Y"]),
+        ("EPS growth 5Y (%)", ["epsGrowth5Y"]),
+        ("Net margin TTM (%)", ["netProfitMarginTTM"]),
+        ("ROE TTM (%)", ["roeTTM"])]:
+        v = next((m[k] for k in keys if m.get(k) is not None), None)
+        lines.append(f"{label}: {fmt_num(v) if v is not None else 'N/A'}")
+    return "\n".join(lines)
+
+
+def ibd_overview(symbol):
+    lines = [f"⭐ {symbol} · IBD-style Overview (unofficial)"]
+    metrics, _ = safe_data("stock/metric", {"symbol": symbol, "metric": "all"})
+    m = metrics.get("metric", {}) if isinstance(metrics, dict) else {}
+    for label, key in [("52-week high", "52WeekHigh"), ("52-week low", "52WeekLow"),
+                       ("52-week price return (%)", "52WeekPriceReturnDaily"),
+                       ("3-month price return (%)", "3MonthPriceReturnDaily"),
+                       ("EPS growth 3Y (%)", "epsGrowth3Y"),
+                       ("Revenue growth 3Y (%)", "revenueGrowth3Y")]:
+        lines.append(f"{label}: {fmt_num(m.get(key))}")
+    lines.append("Official IBD RS, Composite and Acc/Dis ratings are proprietary and NOT calculated here.")
+    lines.append("Trend, volume breakout and institutional accumulation scores require historical OHLCV data.")
+    return "\n".join(lines)
 
 def market():
     lines = ["🌍 Markt (ETF-proxies, niet de officiële indexstanden):"]
@@ -226,24 +336,23 @@ def valid_symbol(text):
 def handle(text, state):
     raw = text.strip()
     low = raw.lower()
+    symbol = state.get("selected", "NVDA")
     if low in ("/cancel", "❌ annuleren"):
         state["ai_next"] = False
         state["pending"] = ""
-        return "Geannuleerd."
+        return "Cancelled."
     if low in ("/start", "/help", "❓ help", "help"):
-        state["pending"] = ""
-        return ("Trading Assistant Lite v1.1.0\n\n"
-                "📈 NVDA of /quote NVDA: koers + beschikbare premarket/after-hours\n"
-                "⭐ /watchlist · ➕ /add AMD · ➖ /remove AMD\n"
-                "🎯 /scanner: watchlist op dagprestatie\n"
-                "🌍 /market · 📰 /news NVDA\n"
-                "🤖 /ai Wat is een ETF?\n"
-                "⚙️ /settings: instellingen en databronnen\n"
-                "Gebruik /cancel om een invoer te annuleren.")
+        return ("Trading Assistant Lite v1.2.0\n\n"
+                "Type NVDA to select a stock and get its quote.\n"
+                "Company · Earnings · Institutions · Analysts · Financials · IBD Overview · Stock News use your selected ticker.\n"
+                "/news NVDA · /company NVDA · /earnings NVDA · /analysts NVDA\n"
+                "/institutions NVDA · /financials NVDA · /ibd NVDA\n"
+                "/watchlist · /add AMD · /remove AMD · /market\n"
+                "AI: /ai your question · /cancel to cancel.")
     if low in ("🤖 ai", "/ai"):
         state["pending"] = ""
         state["ai_next"] = True
-        return "🤖 Stel je volgende vraag. /cancel om te annuleren."
+        return "🤖 Ask your next question. /cancel to cancel."
     if low.startswith("/ai "):
         state["ai_next"] = False
         return ask_ai(raw[4:].strip())
@@ -252,11 +361,11 @@ def handle(text, state):
         return ask_ai(raw)
     if low in ("➕ toevoegen", "toevoegen"):
         state["pending"] = "add"
-        return "Welk tickersymbool toevoegen? Bijvoorbeeld AMD. /cancel om te annuleren."
+        return "Ticker to add? e.g. AMD. /cancel to cancel."
     if low in ("➖ verwijderen", "verwijderen"):
         state["pending"] = "remove"
-        return "Welk tickersymbool verwijderen? Bijvoorbeeld AMD. /cancel om te annuleren."
-    if state.get("pending") in ("add", "remove") and not raw.startswith("/") and not raw.startswith(("📊","📈","⭐","🎯","🌍","📰","⚙️","❓","➕","➖")):
+        return "Ticker to remove? e.g. AMD. /cancel to cancel."
+    if state.get("pending") in ("add", "remove") and valid_symbol(raw) and not raw.startswith("/"):
         action = state["pending"]
         state["pending"] = ""
         return watchlist_change(raw.upper(), state, action)
@@ -266,38 +375,57 @@ def handle(text, state):
         return watchlist_change(raw.split(maxsplit=1)[1].upper(), state, "remove")
     if low in ("📊 overzicht", "overzicht", "/overview"):
         return overview(state)
-    if low in ("🎯 scanner", "scanner", "/scanner"):
-        return scanner(state)
     if low in ("⚙️ instellingen", "instellingen", "/settings"):
-        return ("⚙️ Instellingen\n"
-                f"OpenAI: {'ingesteld' if OPENAI else 'niet ingesteld'}\n"
-                f"Finnhub: {'ingesteld' if FINNHUB else 'niet ingesteld'}\n"
-                f"AI-model: {MODEL}\n"
-                "Koersen: Finnhub; extended hours: aanvullende Yahoo chartbron (best effort).\n"
-                "Wijzig API-sleutels in Home Assistant → Apps → Trading Assistant Lite → Configuratie.")
-    if low in ("🌍 markt", "/market", "markt"):
-        return market()
-    if low in ("📰 nieuws", "/news", "nieuws"):
-        return news()
+        return ("⚙️ Settings\n"
+                f"OpenAI: {'configured' if OPENAI else 'not configured'}\n"
+                f"Finnhub: {'configured' if FINNHUB else 'not configured'}\n"
+                f"AI model: {MODEL}\nSelected: {symbol}\n"
+                "Free Finnhub API availability varies by endpoint; missing data is reported explicitly.")
+    if low in ("🌍 markt", "🌍 market news", "/market", "markt"):
+        return market() if low != "🌍 market news" else news()
+    if low in ("📰 nieuws", "📰 stock news", "/news", "nieuws"):
+        return news(symbol)
     if low.startswith("/news ") or low.startswith("nieuws "):
-        symbol = raw.split(maxsplit=1)[1].strip().upper()
-        return news(symbol) if valid_symbol(symbol) else "Ongeldig tickersymbool."
+        candidate = raw.split(maxsplit=1)[1].strip().upper()
+        if not valid_symbol(candidate):
+            return "Invalid ticker."
+        state["selected"] = candidate
+        return news(candidate)
     if low in ("⭐ watchlist", "/watchlist", "watchlist"):
         lines = ["⭐ Watchlist"]
-        for symbol in state["watchlist"][:25]:
+        for ticker in state["watchlist"][:25]:
             try:
-                d = finnhub("quote", {"symbol": symbol})
-                lines.append(f"{symbol}: ${d.get('c', 0):.2f} ({d.get('dp', 0):+.2f}%)" if d.get("c", 0) else f"{symbol}: niet beschikbaar")
+                d = finnhub("quote", {"symbol": ticker})
+                lines.append(f"{ticker}: ${d.get('c', 0):.2f} ({d.get('dp', 0):+.2f}%)" if d.get("c", 0) else f"{ticker}: unavailable")
             except Exception:
-                lines.append(f"{symbol}: tijdelijk niet beschikbaar")
+                lines.append(f"{ticker}: temporarily unavailable")
         return "\n".join(lines)
     if low == "📈 koersen":
-        return "Typ een ticker zoals NVDA, AAPL, SPY of QQQ."
+        return f"Selected: {symbol}. Type NVDA or another ticker for a quote."
+    commands = [
+        (("🏢 company", "/company"), company),
+        (("📅 earnings", "/earnings"), earnings),
+        (("🏦 institutions", "/institutions"), institutions),
+        (("🎯 analysts", "/analysts"), analysts),
+        (("📊 financials", "/financials"), financials),
+        (("⭐ ibd overview", "/ibd"), ibd_overview),
+    ]
+    for aliases, fn in commands:
+        if low in aliases:
+            return fn(symbol)
+        for alias in aliases:
+            if alias.startswith("/") and low.startswith(alias + " "):
+                candidate = raw[len(alias):].strip().upper()
+                if not valid_symbol(candidate):
+                    return "Invalid ticker."
+                state["selected"] = candidate
+                return fn(candidate)
     if low.startswith("/quote "):
         raw = raw.split(maxsplit=1)[1].strip()
     if valid_symbol(raw):
-        return quote(raw.upper())
-    return "Onbekende opdracht. Typ /help."
+        state["selected"] = raw.upper()
+        return quote(raw.upper()) + "\n\nUse Company, Earnings, Institutions, Analysts, Financials, IBD Overview or Stock News for more."
+    return "Unknown command. Type /help."
 
 
 def watchlist_change(symbol, state, action):
@@ -318,16 +446,16 @@ def main():
     if not TOKEN or not CHAT or not FINNHUB:
         raise SystemExit("Vul telegram_bot_token, telegram_chat_id en finnhub_api_key in bij de app-configuratie.")
     state = load_state()
-    LOG.info("Trading Assistant Lite v1.1.0 gestart (alleen geautoriseerde chat).")
+    LOG.info("Trading Assistant Lite v1.2.0 gestart (alleen geautoriseerde chat).")
     try:
         me = telegram("getMe", {})
         LOG.info("Telegram API bereikbaar; bot: @%s", me.get("username", "onbekend"))
     except Exception:
         LOG.exception("Telegram getMe mislukt; controleer de bot-token")
-    if state.get("menu_version") != "1.1.0":
+    if state.get("menu_version") != "1.2.0":
         try:
-            send("✅ Trading Assistant Lite v1.1.0 actief. Het nieuwe menu staat hieronder.")
-            state["menu_version"] = "1.1.0"
+            send("✅ Trading Assistant Lite v1.2.0 actief. Het nieuwe menu staat hieronder.")
+            state["menu_version"] = "1.2.0"
             save_state(state)
         except Exception:
             LOG.exception("Nieuw Telegram-menu nog niet verzonden")
