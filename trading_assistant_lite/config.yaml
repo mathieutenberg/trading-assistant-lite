@@ -1,5 +1,5 @@
 name: Trading Assistant Lite
-version: "1.1.0"
+version: "1.2.0"
 slug: trading_assistant_lite
 description: Telegram aandelenkoersen, nieuws en optionele OpenAI-vragen
 arch:
