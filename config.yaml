@@ -1,0 +1,21 @@
+name: Trading Assistant Lite
+version: "1.0.0"
+slug: trading_assistant_lite
+description: Telegram aandelenkoersen, nieuws en optionele OpenAI-vragen
+arch:
+  - amd64
+startup: application
+boot: auto
+init: false
+options:
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  finnhub_api_key: ""
+  openai_api_key: ""
+  openai_model: "gpt-4.1-mini"
+schema:
+  telegram_bot_token: password
+  telegram_chat_id: str
+  finnhub_api_key: password
+  openai_api_key: password?
+  openai_model: str
